@@ -33,7 +33,7 @@ func testRelayBackend() *httptest.Server {
 				"name":         "Konsultasi Umum",
 				"extension": []map[string]any{
 					{
-						"url": "http://konsulin.care/fhir/StructureDefinition/fee",
+						"url": constFeeExtensionURL,
 						"valueMoney": map[string]any{
 							"value":    150000,
 							"currency": "IDR",
