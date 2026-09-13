@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query';
-import { PractitionerRole } from 'fhir/r4';
+import { Bundle, PractitionerRole } from 'fhir/r4';
 import { getAPI } from '../api';
 
 interface AvailableTime {
@@ -58,22 +58,28 @@ export async function updatePractitionerRoleAvailability(
 /**
  * Update practitioner role availability using FHIR Bundle transaction
  * This ensures atomic updates across multiple PractitionerRole resources
+ *
+ * Each entry is a version-aware update: `request.ifMatch` carries the
+ * `meta.versionId` read just before the transaction, so if any role changed in
+ * between, the FHIR server rejects the whole transaction with
+ * `412 Precondition Failed` instead of silently overwriting that change.
  */
 export async function updatePractitionerRoleAvailabilityBundle(
   updates: Array<{
     practitionerRoleId: string;
     availableTime: AvailableTime[];
   }>
-): Promise<any> {
+): Promise<Bundle> {
   const API = await getAPI();
 
   // Fetch all current PractitionerRole resources
   const rolePromises = updates.map(async update => {
-    const getResponse = await API.get(
+    const getResponse = await API.get<PractitionerRole>(
       `/fhir/PractitionerRole/${update.practitionerRoleId}`
     );
     return {
-      role: getResponse.data as PractitionerRole,
+      practitionerRoleId: update.practitionerRoleId,
+      role: getResponse.data,
       availableTime: update.availableTime
     };
   });
@@ -81,29 +87,37 @@ export async function updatePractitionerRoleAvailabilityBundle(
   const roles = await Promise.all(rolePromises);
 
   // Build FHIR Bundle entries
-  const bundleEntries = roles.map(({ role, availableTime }) => ({
-    request: {
-      method: 'PUT',
-      url: `PractitionerRole/${role.id}`
-    },
-    resource: {
-      ...role,
-      // Keep parity with the single-resource PUT path: stamp period.start
-      // with the browser's local timezone offset.
-      period: { ...role.period, start: getLocalTimezoneISO() },
-      availableTime
+  const bundleEntries = roles.map(
+    ({ practitionerRoleId, role, availableTime }) => {
+      const versionId = role.meta?.versionId;
+      return {
+        request: {
+          method: 'PUT' as const,
+          url: `PractitionerRole/${practitionerRoleId}`,
+          // Only overwrite the version that was read. Without a versionId the
+          // server has nothing to compare against, so the check is skipped.
+          ...(versionId ? { ifMatch: `W/"${versionId}"` } : {})
+        },
+        resource: {
+          ...role,
+          // Keep parity with the single-resource PUT path: stamp period.start
+          // with the browser's local timezone offset.
+          period: { ...role.period, start: getLocalTimezoneISO() },
+          availableTime
+        }
+      };
     }
-  }));
+  );
 
   // Create FHIR Bundle transaction
-  const bundle = {
+  const bundle: Bundle = {
     resourceType: 'Bundle',
     type: 'transaction',
     entry: bundleEntries
   };
 
   // Post bundle transaction to FHIR server
-  const response = await API.post('/fhir', bundle, {
+  const response = await API.post<Bundle>('/fhir', bundle, {
     headers: {
       'Content-Type': 'application/fhir+json'
     }
